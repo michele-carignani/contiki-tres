@@ -121,6 +121,11 @@
 #define tres_send(...) send_unreliable(__VA_ARGS__)
 #endif
 
+/*
+#undef REST_MAX_CHUNK_SIZE
+#define REST_MAX_CHUNK_SIZE 
+*/
+ 
 /*----------------------------------------------------------------------------*/
 typedef struct tres_is_s {
   struct tres_is_s *next;
@@ -145,11 +150,21 @@ typedef struct tres_tres_s {
   char *last_input_tag;
   uint8_t last_input[REST_MAX_CHUNK_SIZE];
   uint8_t last_output[REST_MAX_CHUNK_SIZE];
+
+  /* Reactive behaviour */  
+  uint8_t reactive_last_input[REST_MAX_CHUNK_SIZE];
+  uint8_t reactive_last_result[REST_MAX_CHUNK_SIZE];
+  char *reactive_last_input_tag;
+  uint8_t is_reactive;
+
   uint8_t state[TRES_STATE_SIZE];
   uint16_t obs_count;
   uint8_t state_len;
   uint8_t monitoring;
 } tres_res_t;
+
+static process_event_t new_input_event;
+
 
 /*----------------------------------------------------------------------------*/
 void tres_init(void);
@@ -157,6 +172,6 @@ void tres_init(void);
 uint8_t tres_start_monitoring(tres_res_t *task);
 uint8_t tres_stop_monitoring(tres_res_t *task);
 uint8_t tres_toggle_monitoring(tres_res_t *task);
-
+// static void send_unreliable(uip_ipaddr_t *addr, uint16_t port, char *path, uint8_t *payload);
 /*----------------------------------------------------------------------------*/
 #endif /*  __TRES_H__  */

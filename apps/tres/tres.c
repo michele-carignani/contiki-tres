@@ -53,7 +53,7 @@
 #include "list_unrename.h"
 #include "tres-interface.h"
 
-#define DEBUG 0
+#define DEBUG 1
 #if DEBUG
 #define PRINTF(...) printf(__VA_ARGS__)
 #define PRINTFLN(format, ...) printf(format "\n", ##__VA_ARGS__)
@@ -85,8 +85,6 @@ extern struct tres_pm_io_s tres_pm_io;
 /// The heap for the Python VM. Make it far memory, dword-aligned.
 static uint8_t heap[TRES_PM_HEAP_SIZE]
   __attribute__ ((aligned((2 * sizeof(int)))));
-
-static process_event_t new_input_event;
 
 /*----------------------------------------------------------------------------*/
 /*                            Forward Declarations                            */
@@ -205,10 +203,17 @@ run_processing_func(tres_res_t *task)
 
   //printf("F?\n");
   pm_init(heap, sizeof(heap), MEMSPACE_PROG, NULL);
-  tres_pm_io.in = (char *)task->last_input;
-  tres_pm_io.out = (char *)task->last_output;
+  if(task->is_reactive != 0){
+    tres_pm_io.in = (char *)task->reactive_last_input;
+    tres_pm_io.out = (char *)task->reactive_last_result;
+    tres_pm_io.tag = (char *)task->last_input_tag;
+  } else {
+    tres_pm_io.in = (char *)task->last_input;
+    tres_pm_io.out = (char *)task->last_output;    
+    tres_pm_io.tag = (char *)task->last_input_tag;
+  }
+  
   tres_pm_io.out[0] = '\0';
-  tres_pm_io.tag = (char *)task->last_input_tag;
   tres_pm_io.output_set = 0;
   tres_pm_io.state = task->state;
   tres_pm_io.state_len = &task->state_len;
@@ -216,11 +221,14 @@ run_processing_func(tres_res_t *task)
   //printf("F!\n");
   //PRINTF("Python finished, return of 0x%02x\n", retval);
   // send output to destination
-  if(tres_pm_io.output_set) {
+  if(tres_pm_io.output_set && task->is_reactive == 0) {
     if(!uip_is_addr_unspecified(task->od->addr)) {
       tres_send_output(task);
     }
     lo_event_handler(task);
+  }
+  if(task->is_reactive){
+    task->is_reactive = 0;
   }
 }
 
@@ -366,9 +374,18 @@ tres_toggle_monitoring(tres_res_t *task)
 void
 tres_init(void)
 {
+
+  PRINTFLN("INIT");
+
   tres_mem_init();
 
+  PRINTFLN("=== MEM INIT OK");
+  
   tres_interface_init();
 
+  PRINTFLN("== INTERFACE INIT OK");
+
   process_start(&pf_process, NULL);
+
+  PRINTFLN("== PF PROCESS STARTED");
 }

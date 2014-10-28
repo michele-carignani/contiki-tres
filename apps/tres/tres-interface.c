@@ -48,7 +48,7 @@
 #include "tres-pymite.h"
 #include "list_unrename.h"
 
-#define DEBUG 0
+#define DEBUG 1
 #if DEBUG
 #define PRINTF(...) printf(__VA_ARGS__)
 #define PRINTFLN(format, ...) printf(format "\n", ##__VA_ARGS__)
@@ -96,20 +96,27 @@
                         REST.set_response_payload(response, text, strlen(text));
 
 #define BLOCK_SPRINTF(str, strpos, bufpos, offset, pref_size, buffer)          \
-              if (strpos + strlen(str) >= *offset) {                           \
+              if (strpos + strlen(str) >= *offset) {                          \
                 bufpos += snprintf((char *) buffer + bufpos,                   \
                                    pref_size - bufpos + 1, str +               \
                             ((*offset - strpos > 0) ? (*offset - strpos) : 0));\
                 if (bufpos >= pref_size) {                                     \
-                  break;                                                       \
+                  \
                 }                                                              \
               }                                                                \
               strpos += strlen(str);
+
+#define PORT UIP_HTONS(COAP_DEFAULT_PORT)
 
 /*----------------------------------------------------------------------------*/
 
 MEMB(tasks_mem, tres_res_t, TRES_TASK_MAX_NUMBER);
 MEMB(is_mem, tres_is_t, TRES_IS_MAX_NUMBER);
+
+uint8_t* reactive_received_input;
+int len;
+extern struct process pf_process;
+extern process_event_t new_input_event;
 
 /*----------------------------------------------------------------------------*/
 /*                            Forward Declarations                            */
@@ -153,6 +160,13 @@ void pf_handler(void *request, void *response, uint8_t *buffer,
 
 void lo_handler(void *request, void *response, uint8_t *buffer,
                 uint16_t preferred_size, int32_t *offset, tres_res_t *task);
+
+void no_handler (void* request, void* response, uint8_t* buffer,
+                 uint16_t preferred_size, int32_t* offset, tres_res_t* task);
+
+static inline void no_handler_get(void *request, void *response,
+                                  uint8_t *buffer, uint16_t preferred_size,
+                                  int32_t *offset, tres_res_t *task);
 
 static inline int16_t create_coap_base_url(char *url, int16_t max_len,
                                           uip_ipaddr_t *addr);
@@ -503,6 +517,11 @@ task_name_handler(void *request, void *response, uint8_t *buffer,
                     preferred_size, buffer);
       BLOCK_SPRINTF(task->name, strpos, bufpos, offset, preferred_size, buffer);
       BLOCK_SPRINTF("/pf>,", strpos, bufpos, offset, preferred_size, buffer);
+      /* </tasks/[task_name]>/no>, */
+      BLOCK_SPRINTF("</" TRES_BASE_PATH "/", strpos, bufpos, offset,
+                    preferred_size, buffer);
+      BLOCK_SPRINTF(task->name, strpos, bufpos, offset, preferred_size, buffer);
+      BLOCK_SPRINTF("/no>,", strpos, bufpos, offset, preferred_size, buffer);
       /* </tasks/[task_name]>/lo>;obs */
       BLOCK_SPRINTF("</" TRES_BASE_PATH "/", strpos, bufpos, offset,
                     preferred_size, buffer);
@@ -557,6 +576,8 @@ subres_handler(void *request, void *response, uint8_t *buffer,
     pf_handler(request, response, buffer, preferred_size, offset, task);
   } else if(strcmp(subres, "lo") == 0) {
     lo_handler(request, response, buffer, preferred_size, offset, task);
+  } else if(strcmp(subres, "no") == 0) {
+    no_handler(request, response, buffer, preferred_size, offset, task);
   } else {
     REST.set_response_status(response, REST.status.NOT_FOUND);
   }
@@ -883,12 +904,122 @@ lo_event_handler(tres_res_t *task)
   task->obs_count++;
   REST.notify_subscribers(&r, task->obs_count, notification);
 }
+
+/*----------------------------------------------------------------------------*/
+/*                             New Output Resource                            */
 /*----------------------------------------------------------------------------*/
 
+void no_handler (void* request, void* response, uint8_t* buffer,
+                 uint16_t preferred_size, int32_t* offset, tres_res_t* task)
+{
+    rest_resource_flags_t method;
+
+    method = REST.get_method_type(request);
+    if(method == METHOD_GET){
+        no_handler_get(request, response, buffer, preferred_size, offset, task);
+    }
+}
+
+/*----------------------------------------------------------------------------*/
+
+static void
+is_reactive_get_handler(void* response){
+  
+  reactive_received_input = NULL;
+  len = 0;
+
+  // get payload
+  len = coap_get_payload(response, &reactive_received_input);
+
+  // call pf function on it
+  if(len > REST_MAX_CHUNK_SIZE) {
+      len = REST_MAX_CHUNK_SIZE;
+  }
+
+  // memcpy(reactive_received_input, payload, len);
+  
+  reactive_received_input[len] = '\0';
+
+}
+
+/*----------------------------------------------------------------------------*/
+
+PROCESS(input_getter, "Retrieve sensor values from /is list");
+
+PROCESS_THREAD(input_getter, ev, data)
+{
+  PROCESS_BEGIN();
+
+  tres_is_t *is;
+
+  // block until task obj is received
+
+  PROCESS_WAIT_EVENT();
+
+  tres_res_t* task = (tres_res_t*) data;
+
+  // Per ogni risorsa in /is
+  for(is = list_head(task->is_list); is != NULL; is = list_item_next(is)) {
+    PRINTF("GET su input source\n");
+
+    static  coap_packet_t request[1];
+
+    coap_init_message(request, COAP_TYPE_CON, COAP_GET, 0);
+    coap_set_header_uri_path(request, is->path);
+
+    // manda una GET sulla risorsa
+    COAP_BLOCKING_REQUEST(is->addr, PORT, request, is_reactive_get_handler);
+    
+    // todo: need to block waiting ?
+
+    // todo: fixme: memory wasted?
+    memcpy(task->reactive_last_input, reactive_received_input, len);
+    task->reactive_last_input[len] = '\0';
+
+    task->reactive_last_input_tag = is->tag;
+    task->is_reactive = 1;
+
+    process_post(&pf_process, new_input_event, task);
+  }
+
+  PROCESS_END();
+}
+
+process_event_t get_new_input;
+
+static void
+no_handler_get(void *request, void *response, uint8_t *buffer,
+               uint16_t preferred_size, int32_t *offset, tres_res_t *task)
+{
+  
+  char base_url[BASE_URL_LEN];
+  size_t strpos;
+  size_t bufpos;
+
+  PRINTF("is_handler_get()\n");
+
+  process_start(&input_getter, NULL);
+
+  process_post_synch(&input_getter, get_new_input, task);
+
+  process_exit(&input_getter);
+  
+  strpos = 0;
+  bufpos = 0;
+  //  BLOCK_SPRINTF(task->reactive_last_result, strpos, bufpos, offset, preferred_size, buffer);
+  REST.set_response_payload(response, task->reactive_last_result, bufpos);
+  REST.set_header_content_type(response, APPLICATION_LINK_FORMAT);
+}
+
+/*----------------------------------------------------------------------------*/
 void
 tres_interface_init(void)
 {
   rest_activate_resource(&resource_tasks);
+  
+  get_new_input = process_alloc_event();
+
+  PRINTFLN("OK");
 }
 
 
